@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Smart Wall Paint Visualizer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+  :root { --bg:#f4f6f8; --panel:#fff; --accent:#3a6ea5; --border:#dfe3e8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:#1f2937; }
+  header { background:var(--accent); color:#fff; padding:14px 20px; display:flex; justify-content:space-between; align-items:center; }
+  header h1 { font-size:18px; margin:0; }
+  #authBar { font-size:13px; }
+  #authBar button { margin-left:8px; }
+  main { max-width:1100px; margin:20px auto; padding:0 16px; display:grid; grid-template-columns: 2fr 1fr; gap:20px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .panel h2 { font-size:15px; margin-top:0; }
+  #canvasWrap { position:relative; border:1px solid var(--border); border-radius:8px; overflow:hidden; background:#eee; }
+  canvas { display:block; max-width:100%; cursor: crosshair; }
+  .colors { display:grid; grid-template-columns: repeat(4, 1fr); gap:8px; margin:10px 0; }
+  .swatch { height:40px; border-radius:6px; border:2px solid transparent; cursor:pointer; }
+  .swatch.selected { border-color:#111; }
+  input[type=file], input[type=text], input[type=email], input[type=password] {
+    width:100%; padding:8px; margin:6px 0; border:1px solid var(--border); border-radius:6px;
+  }
+  button { background:var(--accent); color:#fff; border:none; padding:8px 14px; border-radius:6px; cursor:pointer; }
+  button.secondary { background:#6b7280; }
+  button:disabled { background:#aab; cursor:not-allowed; }
+  .row { display:flex; gap:8px; align-items:center; }
+  #savedList { list-style:none; padding:0; margin:0; }
+  #savedList li { padding:6px 0; border-bottom:1px solid var(--border); font-size:13px; display:flex; justify-content:space-between; }
+  #msg { font-size:13px; margin-top:8px; min-height:18px; }
+  .hint { font-size:12px; color:#6b7280; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🎨 Smart Wall Paint Visualizer</h1>
+  <div id="authBar"></div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>1. Upload room photo &amp; select wall</h2>
+    <input type="file" id="fileInput" accept="image/png, image/jpeg" />
+    <p class="hint">Click points on the wall to draw a polygon around the area you want to repaint, then click the first point again (or press "Close shape") to finish.</p>
+    <div id="canvasWrap"><canvas id="canvas"></canvas></div>
+    <div class="row" style="margin-top:8px;">
+      <button id="closeShapeBtn">Close shape</button>
+      <button id="clearShapeBtn" class="secondary">Clear selection</button>
+      <button id="applyBtn">Apply paint</button>
+    </div>
+    <div id="msg"></div>
+  </section>
+
+  <section class="panel">
+    <h2>2. Choose colour</h2>
+    <div id="colorList" class="colors"></div>
+    <label>Opacity: <span id="opacityVal">85%</span></label>
+    <input type="range" id="opacity" min="10" max="100" value="85" style="width:100%" />
+
+    <h2 style="margin-top:20px;">3. Save / download</h2>
+    <div class="row">
+      <button id="saveBtn" disabled>Save project</button>
+      <button id="downloadBtn" class="secondary" disabled>Download</button>
+    </div>
+
+    <h2 style="margin-top:20px;">Saved designs</h2>
+    <ul id="savedList"></ul>
+  </section>
+</main>
+
+<!-- Login / Register modal (very small, inline) -->
+<div id="authModal" style="position:fixed; inset:0; background:rgba(0,0,0,.4); display:flex; align-items:center; justify-content:center;">
+  <div class="panel" style="width:320px;">
+    <h2 id="authTitle">Log in</h2>
+    <input type="text" id="nameInput" placeholder="Name (register only)" style="display:none" />
+    <input type="email" id="emailInput" placeholder="Email" />
+    <input type="password" id="passInput" placeholder="Password" />
+    <div class="row">
+      <button id="authSubmit">Log in</button>
+      <button id="authToggle" class="secondary">Need an account?</button>
+    </div>
+    <div id="authMsg" style="font-size:12px;color:#b91c1c;"></div>
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:5000/api';
+let token = localStorage.getItem('token') || null; // demo only: fine for local single-user testing
+let currentUser = JSON.parse(localStorage.getItem('user') || 'null');
+
+let colors = [];
+let selectedColor = null;
+let polygon = [];
+let shapeClosed = false;
+let img = new Image();
+let imgDataUrl = null;
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+// ---------- AUTH ----------
+const authModal = document.getElementById('authModal');
+let isRegisterMode = false;
+
+function renderAuthBar() {
+  const bar = document.getElementById('authBar');
+  if (currentUser) {
+    bar.innerHTML = `Hi, ${currentUser.name} <button id="logoutBtn">Log out</button>`;
+    document.getElementById('logoutBtn').onclick = logout;
+    authModal.style.display = 'none';
+    loadSavedProjects();
+  } else {
+    bar.innerHTML = '';
+    authModal.style.display = 'flex';
+  }
+}
+
+document.getElementById('authToggle').onclick = () => {
+  isRegisterMode = !isRegisterMode;
+  document.getElementById('authTitle').textContent = isRegisterMode ? 'Register' : 'Log in';
+  document.getElementById('authSubmit').textContent = isRegisterMode ? 'Register' : 'Log in';
+  document.getElementById('nameInput').style.display = isRegisterMode ? 'block' : 'none';
+  document.getElementById('authToggle').textContent = isRegisterMode ? 'Have an account?' : 'Need an account?';
+};
+
+document.getElementById('authSubmit').onclick = async () => {
+  const name = document.getElementById('nameInput').value;
+  const email = document.getElementById('emailInput').value;
+  const password = document.getElementById('passInput').value;
+  const endpoint = isRegisterMode ? '/auth/register' : '/auth/login';
+  try {
+    const res = await fetch(API + endpoint, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(isRegisterMode ? {name, email, password} : {email, password})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Auth failed');
+    token = data.token; currentUser = data.user;
+    localStorage.setItem('token', token);
+    localStorage.setItem('user', JSON.stringify(currentUser));
+    document.getElementById('authMsg').textContent = '';
+    renderAuthBar();
+  } catch (err) {
+    document.getElementById('authMsg').textContent = err.message;
+  }
+};
+
+function logout() {
+  token = null; currentUser = null;
+  localStorage.removeItem('token'); localStorage.removeItem('user');
+  renderAuthBar();
+}
+
+function authHeaders() {
+  return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token };
+}
+
+// ---------- COLOR PALETTE ----------
+async function loadColors() {
+  const res = await fetch(API + '/colors');
+  colors = await res.json();
+  const list = document.getElementById('colorList');
+  list.innerHTML = '';
+  colors.forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'swatch';
+    div.style.background = c.hex;
+    div.title = c.name;
+    div.onclick = () => {
+      selectedColor = c;
+      document.querySelectorAll('.swatch').forEach(s => s.classList.remove('selected'));
+      div.classList.add('selected');
+    };
+    list.appendChild(div);
+  });
+}
+
+document.getElementById('opacity').oninput = (e) => {
+  document.getElementById('opacityVal').textContent = e.target.value + '%';
+};
+
+// ---------- IMAGE UPLOAD ----------
+document.getElementById('fileInput').onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    imgDataUrl = ev.target.result;
+    img = new Image();
+    img.onload = () => {
+      const maxW = 700;
+      const scale = Math.min(1, maxW / img.width);
+      canvas.width = img.width * scale;
+      canvas.height = img.height * scale;
+      redraw();
+    };
+    img.src = imgDataUrl;
+    polygon = []; shapeClosed = false;
+  };
+  reader.readAsDataURL(file);
+};
+
+// ---------- WALL POLYGON SELECTION ----------
+canvas.addEventListener('click', (e) => {
+  if (!img.src || shapeClosed) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  // clicking near the first point closes the shape
+  if (polygon.length > 2) {
+    const [fx, fy] = [polygon[0].x, polygon[0].y];
+    if (Math.hypot(x - fx, y - fy) < 10) {
+      shapeClosed = true;
+      redraw();
+      return;
+    }
+  }
+  polygon.push({ x, y });
+  redraw();
+});
+
+document.getElementById('closeShapeBtn').onclick = () => {
+  if (polygon.length > 2) { shapeClosed = true; redraw(); }
+};
+document.getElementById('clearShapeBtn').onclick = () => {
+  polygon = []; shapeClosed = false; redraw();
+};
+
+function redraw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (img.src) ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  if (polygon.length) {
+    ctx.beginPath();
+    ctx.moveTo(polygon[0].x, polygon[0].y);
+    polygon.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+    if (shapeClosed) ctx.closePath();
+    ctx.strokeStyle = '#ff3b3b';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    polygon.forEach(p => {
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI*2);
+      ctx.fillStyle = '#ff3b3b'; ctx.fill();
+    });
+  }
+}
+
+// ---------- APPLY PAINT ----------
+document.getElementById('applyBtn').onclick = () => {
+  const msg = document.getElementById('msg');
+  if (!img.src) return msg.textContent = 'Upload a room photo first.';
+  if (!shapeClosed || polygon.length < 3) return msg.textContent = 'Draw and close a wall selection first.';
+  if (!selectedColor) return msg.textContent = 'Pick a paint colour first.';
+
+  const opacity = document.getElementById('opacity').value / 100;
+
+  // Redraw base image, then paint the selected polygon using 'multiply'
+  // blend mode so the room's original shading/texture shows through.
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(polygon[0].x, polygon[0].y);
+  polygon.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+  ctx.closePath();
+  ctx.clip();
+
+  ctx.globalAlpha = opacity;
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.fillStyle = selectedColor.hex;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.restore();
+
+  msg.textContent = 'Paint applied. You can save or download the result.';
+  document.getElementById('saveBtn').disabled = false;
+  document.getElementById('downloadBtn').disabled = false;
+};
+
+// ---------- SAVE / DOWNLOAD ----------
+document.getElementById('downloadBtn').onclick = () => {
+  const link = document.createElement('a');
+  link.download = 'wall-preview.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+};
+
+document.getElementById('saveBtn').onclick = async () => {
+  const msg = document.getElementById('msg');
+  try {
+    const res = await fetch(API + '/projects', {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({
+        name: 'Room design ' + new Date().toLocaleString(),
+        originalImage: imgDataUrl,
+        wallSelections: [{ points: polygon, colorId: selectedColor._id, opacity: document.getElementById('opacity').value / 100 }],
+        finalImage: canvas.toDataURL('image/png'),
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+    msg.textContent = 'Project saved!';
+    loadSavedProjects();
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+};
+
+async function loadSavedProjects() {
+  if (!token) return;
+  const res = await fetch(API + '/projects', { headers: authHeaders() });
+  if (!res.ok) return;
+  const projects = await res.json();
+  const list = document.getElementById('savedList');
+  list.innerHTML = '';
+  projects.forEach(p => {
+    const li = document.createElement('li');
+    li.innerHTML = `<span>${p.name}</span> <button data-id="${p._id}" class="secondary">Delete</button>`;
+    li.querySelector('button').onclick = async () => {
+      await fetch(API + '/projects/' + p._id, { method: 'DELETE', headers: authHeaders() });
+      loadSavedProjects();
+    };
+    list.appendChild(li);
+  });
+}
+
+// ---------- INIT ----------
+renderAuthBar();
+loadColors();
+</script>
+</body>
+</html>
